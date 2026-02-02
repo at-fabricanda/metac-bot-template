@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import math
 from datetime import datetime, timezone
 import dotenv
 from typing import Literal
@@ -118,6 +119,24 @@ class SpringTemplateBot2026(ForecastBot):
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
+    _extremize_factor = 1.3  # Correction for LLM hedging bias (1.0 = no change, higher = more extreme)
+
+    @staticmethod
+    def extremize(prob: float, factor: float = 1.3) -> float:
+        """
+        Correct for LLM hedging bias by pushing probabilities away from 0.5.
+        Research shows LLMs predict ~0.6 when truth is ~0.85.
+        Uses logit transformation for mathematically sound extremizing.
+
+        Args:
+            prob: Probability between 0.01 and 0.99
+            factor: Extremizing strength (1.0 = no change, 1.5 = strong)
+        """
+        # Clamp to avoid log(0) errors
+        prob = max(0.01, min(0.99, prob))
+        # Logit transform, scale, inverse logit
+        logit = math.log(prob / (1 - prob))
+        return 1 / (1 + math.exp(-factor * logit))
 
     ##################################### RESEARCH #####################################
 
@@ -130,7 +149,7 @@ class SpringTemplateBot2026(ForecastBot):
                 f"""
                 You are an assistant to a superforecaster.
                 The superforecaster will give you a question they intend to forecast on.
-                To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
+                To be a great assistant, you generate a concise but detailed research report.
                 You do not produce forecasts yourself.
 
                 Question:
@@ -140,6 +159,26 @@ class SpringTemplateBot2026(ForecastBot):
                 {question.resolution_criteria}
 
                 {question.fine_print}
+
+                Your research report MUST include:
+
+                1. BASE RATES (Outside View):
+                   - How often do similar events happen in similar situations?
+                   - What is the historical frequency of this type of outcome?
+                   - Find relevant reference classes and their statistics.
+
+                2. CURRENT SITUATION (Inside View):
+                   - What are the most relevant recent news and developments?
+                   - What specific factors make this case different from the base rate?
+                   - Would this resolve Yes or No based on current information?
+
+                3. EXPERT OPINIONS & PREDICTIONS:
+                   - What do domain experts say about this topic?
+                   - Are there any existing forecasts or prediction market prices?
+
+                4. KEY UNCERTAINTIES:
+                   - What factors could cause an unexpected outcome?
+                   - What information is missing that would be valuable?
                 """
             )
 
@@ -178,7 +217,7 @@ class SpringTemplateBot2026(ForecastBot):
     ) -> ReasonedPrediction[float]:
         prompt = clean_indents(
             f"""
-            You are a professional forecaster interviewing for a job.
+            You are a professional superforecaster interviewing for a job.
 
             Your interview question is:
             {question.question_text}
@@ -198,13 +237,33 @@ class SpringTemplateBot2026(ForecastBot):
 
             Today is {datetime.now().strftime("%Y-%m-%d")}.
 
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A brief description of a scenario that results in a No outcome.
-            (d) A brief description of a scenario that results in a Yes outcome.
+            Use the SUPERFORECASTING methodology:
 
-            You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.
+            (a) TIME HORIZON: How much time remains until resolution?
+
+            (b) BASE RATE (Outside View):
+                - What is the historical frequency of similar events?
+                - In what percentage of similar situations did this type of outcome occur?
+                - Start with this base rate as your anchor.
+
+            (c) INSIDE VIEW ADJUSTMENT:
+                - What specific factors make this case different from the base rate?
+                - How much should you adjust from the base rate, and in which direction?
+
+            (d) STATUS QUO: What happens if nothing changes? (The world changes slowly)
+
+            (e) SCENARIO ANALYSIS:
+                - Describe a concrete scenario leading to YES
+                - Describe a concrete scenario leading to NO
+
+            (f) REASONS YOU MIGHT BE WRONG:
+                - List 2-3 reasons your forecast could be too high
+                - List 2-3 reasons your forecast could be too low
+
+            (g) FINAL SYNTHESIS:
+                - Start from base rate, apply adjustments, state your confidence level
+                - Be precise: distinguish between 60% vs 65% vs 70%
+
             {self._get_conditional_disclaimer_if_necessary(question)}
 
             The last thing you write is your final answer as: "Probability: ZZ%", 0-100
@@ -226,7 +285,11 @@ class SpringTemplateBot2026(ForecastBot):
             model=self.get_llm("parser", "llm"),
             num_validation_samples=self._structure_output_validation_samples,
         )
-        decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+        raw_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+        # Apply extremizing to correct for LLM hedging bias
+        decimal_pred = self.extremize(raw_pred, self._extremize_factor)
+        decimal_pred = max(0.01, min(0.99, decimal_pred))
+        logger.info(f"Extremized prediction: {raw_pred:.3f} -> {decimal_pred:.3f}")
 
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {decimal_pred}."
@@ -240,7 +303,7 @@ class SpringTemplateBot2026(ForecastBot):
     ) -> ReasonedPrediction[PredictedOptionList]:
         prompt = clean_indents(
             f"""
-            You are a professional forecaster interviewing for a job.
+            You are a professional superforecaster interviewing for a job.
 
             Your interview question is:
             {question.question_text}
@@ -261,13 +324,33 @@ class SpringTemplateBot2026(ForecastBot):
 
             Today is {datetime.now().strftime("%Y-%m-%d")}.
 
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A description of an scenario that results in an unexpected outcome.
+            Use the SUPERFORECASTING methodology:
+
+            (a) TIME HORIZON: How much time remains until resolution?
+
+            (b) BASE RATES (Outside View):
+                - For each option, what is the historical frequency of similar outcomes?
+                - What would a naive/uninformed prior probability be for each option?
+
+            (c) INSIDE VIEW ADJUSTMENTS:
+                - What specific current factors favor or disfavor each option?
+                - How do recent developments shift probabilities from base rates?
+
+            (d) STATUS QUO: Which option represents "nothing changes"?
+
+            (e) UNEXPECTED SCENARIOS:
+                - What could cause a low-probability option to win?
+                - Leave meaningful probability mass on surprising outcomes.
+
+            (f) REASONS YOU MIGHT BE WRONG:
+                - For your top choice: why might it NOT happen?
+                - For low-probability options: what could make them more likely?
+
+            (g) FINAL SYNTHESIS:
+                - Probabilities must sum to 100%
+                - Be precise and leave some probability on unlikely options
 
             {self._get_conditional_disclaimer_if_necessary(question)}
-            You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.
 
             The last thing you write is your final probabilities for the N options in this order {question.options} as:
             Option_A: Probability_A
@@ -319,7 +402,7 @@ class SpringTemplateBot2026(ForecastBot):
         )
         prompt = clean_indents(
             f"""
-            You are a professional forecaster interviewing for a job.
+            You are a professional superforecaster interviewing for a job.
 
             Your interview question is:
             {question.question_text}
@@ -346,16 +429,38 @@ class SpringTemplateBot2026(ForecastBot):
             - Never use scientific notation.
             - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.
 
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The outcome if nothing changed.
-            (c) The outcome if the current trend continued.
-            (d) The expectations of experts and markets.
-            (e) A brief description of an unexpected scenario that results in a low outcome.
-            (f) A brief description of an unexpected scenario that results in a high outcome.
+            Use the SUPERFORECASTING methodology:
+
+            (a) TIME HORIZON: How much time remains until resolution?
+
+            (b) BASE RATE (Outside View - FERMI ESTIMATION):
+                - Break this into sub-components you can estimate
+                - What are historical values for similar metrics?
+                - What range would a naive/uninformed estimate give?
+
+            (c) INSIDE VIEW ADJUSTMENTS:
+                - What specific current factors shift the estimate up or down?
+                - What recent trends are relevant?
+
+            (d) STATUS QUO: What value if nothing changed from today?
+
+            (e) TREND PROJECTION: What value if current trends continue?
+
+            (f) EXPERT/MARKET EXPECTATIONS: What do forecasts or models predict?
+
+            (g) TAIL SCENARIOS:
+                - Low tail: What unexpected scenario causes a very low outcome?
+                - High tail: What unexpected scenario causes a very high outcome?
+
+            (h) REASONS YOU MIGHT BE WRONG:
+                - Why might the true value be LOWER than your median estimate?
+                - Why might the true value be HIGHER than your median estimate?
+
+            (i) FINAL SYNTHESIS:
+                - Set WIDE 90/10 confidence intervals for unknown unknowns
+                - Percentile 10 and 90 should capture surprising-but-possible outcomes
 
             {self._get_conditional_disclaimer_if_necessary(question)}
-            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
 
             The last thing you write is your final answer as:
             "
@@ -413,7 +518,7 @@ class SpringTemplateBot2026(ForecastBot):
         )
         prompt = clean_indents(
             f"""
-            You are a professional forecaster interviewing for a job.
+            You are a professional superforecaster interviewing for a job.
 
             Your interview question is:
             {question.question_text}
@@ -435,29 +540,47 @@ class SpringTemplateBot2026(ForecastBot):
 
             Formatting Instructions:
             - This is a date question, and as such, the answer must be expressed in terms of dates.
-            - The dates must be written in the format of YYYY-MM-DD. If hours matter, please append the date with the hour in UTC and military time: YYYY-MM-DDTHH:MM:SSZ.No other formatting is allowed.
+            - The dates must be written in the format of YYYY-MM-DD. If hours matter, please append the date with the hour in UTC and military time: YYYY-MM-DDTHH:MM:SSZ. No other formatting is allowed.
             - Always start with a lower date chronologically and then increase from there.
             - Do NOT forget this. The dates must be written in chronological order starting at the earliest time at percentile 10 and increasing from there.
 
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The outcome if nothing changed.
-            (c) The outcome if the current trend continued.
-            (d) The expectations of experts and markets.
-            (e) A brief description of an unexpected scenario that results in a low outcome.
-            (f) A brief description of an unexpected scenario that results in a high outcome.
+            Use the SUPERFORECASTING methodology:
+
+            (a) TIME HORIZON: How much time until the question closes or resolves?
+
+            (b) BASE RATE (Outside View):
+                - How long have similar events/milestones taken historically?
+                - What is the typical timeline for comparable situations?
+
+            (c) INSIDE VIEW ADJUSTMENTS:
+                - What specific factors might accelerate or delay this?
+                - What is the current status and trajectory?
+
+            (d) STATUS QUO: When would this happen if nothing changed?
+
+            (e) TREND PROJECTION: When if current trends continue?
+
+            (f) EXPERT/MARKET EXPECTATIONS: What timelines do experts predict?
+
+            (g) TAIL SCENARIOS:
+                - Early scenario: What could cause this much sooner than expected?
+                - Late scenario: What could cause significant delays?
+
+            (h) REASONS YOU MIGHT BE WRONG:
+                - Why might it happen EARLIER than your median?
+                - Why might it happen LATER than your median?
 
             {self._get_conditional_disclaimer_if_necessary(question)}
-            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
+            Set WIDE 90/10 confidence intervals for unknown unknowns.
 
             The last thing you write is your final answer as:
             "
-            Percentile 10: YYYY-MM-DD (oldest date)
+            Percentile 10: YYYY-MM-DD (earliest date)
             Percentile 20: YYYY-MM-DD
             Percentile 40: YYYY-MM-DD
             Percentile 60: YYYY-MM-DD
             Percentile 80: YYYY-MM-DD
-            Percentile 90: YYYY-MM-DD (newest date)
+            Percentile 90: YYYY-MM-DD (latest date)
             "
             """
         )
