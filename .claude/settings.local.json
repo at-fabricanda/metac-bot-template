@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(poetry check:*)",
+      "Bash(poetry install:*)",
+      "Bash(poetry run python:*)",
+      "WebSearch",
+      "WebFetch(domain:aiimpacts.org)",
+      "WebFetch(domain:goodjudgment.com)",
+      "WebFetch(domain:www.metaculus.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:forum.effectivealtruism.org)",
+      "Bash(curl:*)",
+      "Bash(python -c:*)",
+      "Bash(gh workflow list:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh secret:*)",
+      "Bash(gh repo fork:*)",
+      "Bash(git remote set-url:*)",
+      "Bash(gh workflow enable:*)",
+      "Bash(git fetch:*)",
+      "Bash(gh repo sync:*)",
+      "Bash(git pull:*)",
+      "Bash(gh workflow run:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
