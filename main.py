@@ -120,6 +120,17 @@ class SpringTemplateBot2026(ForecastBot):
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
     _extremize_factor = 1.3  # Correction for LLM hedging bias (1.0 = no change, higher = more extreme)
+    
+    # Multi-model ensemble configuration
+    # Using 3x GPT-4o + 2x Claude Sonnet for diverse predictions
+    _ensemble_models = [
+        "openrouter/openai/gpt-4o",
+        "openrouter/openai/gpt-4o",
+        "openrouter/openai/gpt-4o",
+        "openrouter/anthropic/claude-3.5-sonnet",
+        "openrouter/anthropic/claude-3.5-sonnet",
+    ]
+    _use_ensemble = True  # Toggle ensemble on/off
 
     @staticmethod
     def extremize(prob: float, factor: float = 1.3) -> float:
@@ -137,6 +148,43 @@ class SpringTemplateBot2026(ForecastBot):
         # Logit transform, scale, inverse logit
         logit = math.log(prob / (1 - prob))
         return 1 / (1 + math.exp(-factor * logit))
+
+    @staticmethod
+    def filter_outliers(predictions: list[float], sigma_threshold: float = 2.0) -> list[float]:
+        """
+        Filter outlier predictions that are more than sigma_threshold standard deviations
+        from the median. Returns filtered list (minimum 2 predictions kept).
+        
+        Args:
+            predictions: List of probability predictions (0-1)
+            sigma_threshold: Number of standard deviations for outlier cutoff
+        """
+        if len(predictions) <= 2:
+            return predictions
+        
+        import statistics
+        median = statistics.median(predictions)
+        
+        # Calculate standard deviation
+        if len(predictions) > 1:
+            stdev = statistics.stdev(predictions)
+        else:
+            return predictions
+        
+        # If stdev is very small, all predictions are similar - keep all
+        if stdev < 0.01:
+            return predictions
+        
+        # Filter predictions within threshold
+        filtered = [p for p in predictions if abs(p - median) <= sigma_threshold * stdev]
+        
+        # Ensure we keep at least 2 predictions
+        if len(filtered) < 2:
+            # Sort by distance from median, keep closest 2
+            sorted_by_distance = sorted(predictions, key=lambda p: abs(p - median))
+            filtered = sorted_by_distance[:2]
+        
+        return filtered
 
     ##################################### RESEARCH #####################################
 
@@ -277,6 +325,10 @@ class SpringTemplateBot2026(ForecastBot):
         question: BinaryQuestion,
         prompt: str,
     ) -> ReasonedPrediction[float]:
+        if self._use_ensemble:
+            return await self._ensemble_binary_forecast(question, prompt)
+        
+        # Single-model fallback
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         binary_prediction: BinaryPrediction = await structure_output(
@@ -295,6 +347,76 @@ class SpringTemplateBot2026(ForecastBot):
             f"Forecasted URL {question.page_url} with prediction: {decimal_pred}."
         )
         return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
+
+    async def _ensemble_binary_forecast(
+        self,
+        question: BinaryQuestion,
+        prompt: str,
+    ) -> ReasonedPrediction[float]:
+        """
+        Multi-model ensemble forecasting: query multiple models, filter outliers, average.
+        This improves accuracy by reducing individual model biases.
+        """
+        async def get_single_prediction(model_name: str) -> tuple[float, str]:
+            """Get prediction from a single model."""
+            try:
+                llm = GeneralLlm(model=model_name, temperature=0.3, timeout=60, allowed_tries=2)
+                reasoning = await llm.invoke(prompt)
+                binary_prediction: BinaryPrediction = await structure_output(
+                    reasoning,
+                    BinaryPrediction,
+                    model=self.get_llm("parser", "llm"),
+                    num_validation_samples=1,  # Faster parsing for ensemble
+                )
+                raw_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+                logger.info(f"[Ensemble] {model_name}: {raw_pred:.3f}")
+                return raw_pred, reasoning
+            except Exception as e:
+                logger.warning(f"[Ensemble] {model_name} failed: {e}")
+                return None, ""
+        
+        # Query all models concurrently
+        tasks = [get_single_prediction(model) for model in self._ensemble_models]
+        results = await asyncio.gather(*tasks)
+        
+        # Collect successful predictions
+        raw_predictions = []
+        all_reasonings = []
+        for pred, reasoning in results:
+            if pred is not None:
+                raw_predictions.append(pred)
+                all_reasonings.append(reasoning)
+        
+        if not raw_predictions:
+            # All models failed - fall back to default
+            logger.error("[Ensemble] All models failed, falling back to default")
+            reasoning = await self.get_llm("default", "llm").invoke(prompt)
+            binary_prediction: BinaryPrediction = await structure_output(
+                reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
+            )
+            raw_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+            decimal_pred = self.extremize(raw_pred, self._extremize_factor)
+            return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
+        
+        # Filter outliers
+        filtered_predictions = self.filter_outliers(raw_predictions)
+        logger.info(f"[Ensemble] Raw: {[f'{p:.3f}' for p in raw_predictions]}")
+        logger.info(f"[Ensemble] After filtering: {[f'{p:.3f}' for p in filtered_predictions]}")
+        
+        # Average the filtered predictions
+        avg_pred = sum(filtered_predictions) / len(filtered_predictions)
+        
+        # Apply extremizing
+        decimal_pred = self.extremize(avg_pred, self._extremize_factor)
+        decimal_pred = max(0.01, min(0.99, decimal_pred))
+        
+        logger.info(f"[Ensemble] Average: {avg_pred:.3f} -> Extremized: {decimal_pred:.3f}")
+        logger.info(f"Forecasted URL {question.page_url} with ensemble prediction: {decimal_pred}")
+        
+        # Use the first successful reasoning for the report
+        combined_reasoning = f"[Ensemble of {len(raw_predictions)} models]\n\n{all_reasonings[0]}"
+        
+        return ReasonedPrediction(prediction_value=decimal_pred, reasoning=combined_reasoning)
 
     ##################################### MULTIPLE CHOICE QUESTIONS #####################################
 
@@ -790,23 +912,23 @@ if __name__ == "__main__":
 
     template_bot = SpringTemplateBot2026(
         research_reports_per_question=1,
-        predictions_per_research_report=5,
+        predictions_per_research_report=1,  # Reduced to 1 since we use internal 5-model ensemble
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=True,
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o", # "anthropic/claude-sonnet-4-20250514", etc (see docs for litellm)
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        llms={  # Using GPT-4o as default; ensemble uses multiple models internally
+            "default": GeneralLlm(
+                model="openrouter/openai/gpt-4o",
+                temperature=0.3,
+                timeout=60,
+                allowed_tries=2,
+            ),
+            "summarizer": "openrouter/openai/gpt-4o-mini",
+            "researcher": "asknews/news-summaries",
+            "parser": "openrouter/openai/gpt-4o-mini",
+        },
     )
 
     client = MetaculusClient()

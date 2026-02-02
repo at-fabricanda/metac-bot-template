@@ -56,15 +56,12 @@ Factor 1.3 pushes 0.6 → 0.66, 0.7 → 0.77, etc.
 - Extremizing (factor 1.3)
 - Superforecasting prompts with base rates, inside view, scenarios
 - Research integration (AskNews)
+- **Multi-model ensemble** (3x GPT-4o + 2x Claude Sonnet)
+- **Outlier filtering** (>2σ from median removed before averaging)
 
-### 🔲 TODO: Multi-Model Ensemble
-Top bots use 3-5 models, discard outliers, average. Example:
-- 3x GPT-4o + 2x Claude Sonnet
-- Discard highest and lowest
-- Average remaining predictions
-
-### 🔲 TODO: Outlier Filtering  
-Before aggregating: remove predictions >2σ from median.
+### Configuration
+Toggle ensemble on/off with `_use_ensemble = True/False` in class variables.
+Models defined in `_ensemble_models` list.
 
 ## Learnings Log
 
@@ -74,6 +71,14 @@ Before aggregating: remove predictions >2σ from median.
 - Forked from Metaculus template
 - Added extremizing (1.3 factor)
 - Enhanced prompts with superforecasting methodology
+- Added CLAUDE.md for self-improving rules
+
+### 2025-02-02 — Multi-Model Ensemble
+- Implemented 5-model ensemble (3x GPT-4o + 2x Claude Sonnet)
+- Added outlier filtering (>2σ from median)
+- Reduced parent predictions_per_research_report to 1 (ensemble handles aggregation)
+- Models queried concurrently for speed
+- Result: Pending benchmark testing
 
 <!-- 
 Add entries like:
