@@ -122,13 +122,16 @@ class SpringTemplateBot2026(ForecastBot):
     _extremize_factor = 1.3  # Correction for LLM hedging bias (1.0 = no change, higher = more extreme)
     
     # Multi-model ensemble configuration
-    # Using 3x GPT-4o + 2x Claude Sonnet for diverse predictions
+    # Using 5x GPT-4o for reliable predictions (add Claude when available)
+    # To add model diversity, uncomment Claude lines when you have Anthropic access
     _ensemble_models = [
         "openrouter/openai/gpt-4o",
         "openrouter/openai/gpt-4o",
         "openrouter/openai/gpt-4o",
-        "openrouter/anthropic/claude-3.5-sonnet",
-        "openrouter/anthropic/claude-3.5-sonnet",
+        "openrouter/openai/gpt-4o",
+        "openrouter/openai/gpt-4o",
+        # "openrouter/anthropic/claude-3.5-sonnet",  # Uncomment when available
+        # "openrouter/anthropic/claude-3.5-sonnet",
     ]
     _use_ensemble = True  # Toggle ensemble on/off
 
@@ -926,7 +929,7 @@ if __name__ == "__main__":
                 allowed_tries=2,
             ),
             "summarizer": "openrouter/openai/gpt-4o-mini",
-            "researcher": "asknews/news-summaries",
+            "researcher": "openrouter/openai/gpt-4o",  # Using LLM for research (no AskNews needed)
             "parser": "openrouter/openai/gpt-4o-mini",
         },
     )
